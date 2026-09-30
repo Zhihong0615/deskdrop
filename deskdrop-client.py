@@ -542,32 +542,42 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         file_id = urllib.parse.quote(message.get("fileId", ""), safe="")
         conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=60)
         name = Path(message.get("name", "file")).name
-        conn.request("GET", f"/api/files/{file_id}")
-        response = conn.getresponse()
-        if response.status >= 300:
-            detail = response.read().decode("utf-8", "replace")
+        temporary = None
+        temporary_created = False
+        try:
+            conn.request("GET", f"/api/files/{file_id}")
+            response = conn.getresponse()
+            if response.status >= 300:
+                detail = response.read().decode("utf-8", "replace")
+                raise RuntimeError(detail or "文件下载失败")
+            total = int(response.getheader("Content-Length") or 0)
+            downloads = Path.home() / "Downloads"
+            downloads.mkdir(parents=True, exist_ok=True)
+            target = downloads / name
+            stem, suffix = target.stem, target.suffix
+            index = 1
+            while target.exists():
+                target = downloads / f"{stem} ({index}){suffix}"
+                index += 1
+            temporary = downloads / f".{target.name}.{uuid.uuid4().hex}.part"
+            with temporary.open("xb") as output:
+                temporary_created = True
+                received = 0
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    output.write(block)
+                    received += len(block)
+                    if total:
+                        GLib.idle_add(self.update_transfer, min(1.0, received / total))
+            os.replace(temporary, target)
+        except Exception:
+            if temporary_created and temporary is not None:
+                temporary.unlink(missing_ok=True)
+            raise
+        finally:
             conn.close()
-            raise RuntimeError(detail or "文件下载失败")
-        total = int(response.getheader("Content-Length") or 0)
-        downloads = Path.home() / "Downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        target = downloads / name
-        stem, suffix = target.stem, target.suffix
-        index = 1
-        while target.exists():
-            target = downloads / f"{stem} ({index}){suffix}"
-            index += 1
-        with target.open("wb") as output:
-            received = 0
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                output.write(block)
-                received += len(block)
-                if total:
-                    GLib.idle_add(self.update_transfer, min(1.0, received / total))
-        conn.close()
         GLib.idle_add(self.finish_transfer, True, f"已下载到 Downloads · {name}")
         GLib.idle_add(button.set_sensitive, True)
 
