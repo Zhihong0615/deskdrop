@@ -22,7 +22,7 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
 CSS = """
 window { background: #f5f5f7; color: #1d1d1f; }
 .app-shell { background: #f5f5f7; }
-.sidebar { background: #fff; border-right: 1px solid #e7e7eb; padding: 14px 10px; }
+.sidebar { background: #fff; border-right: 1px solid #e7e7eb; border-bottom-left-radius: 14px; padding: 14px 10px; }
 .sidebar-brand { padding: 4px 7px 12px; }
 .sidebar-heading { color: #85858d; font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 9px 8px 5px; }
 .room-list-button { min-height: 54px; padding: 7px 9px; border-radius: 10px; background: transparent; }
@@ -60,7 +60,7 @@ window { background: #f5f5f7; color: #1d1d1f; }
 .empty-symbol { color: #147efb; font-size: 27px; }
 .empty-title { color: #303036; font-size: 14px; font-weight: 650; }
 .empty-copy { color: #85858d; font-size: 11px; }
-.composer { background: #fff; border-top: 1px solid #e7e7eb; padding: 12px 18px 16px; }
+.composer { background: #fff; border-top: 1px solid #e7e7eb; border-bottom-right-radius: 14px; padding: 12px 18px 16px; }
 .composer entry { min-height: 42px; border-radius: 13px; padding: 0 13px; background: #f4f4f6; border: 1px solid #ededf0; }
 button.attach { min-width: 42px; min-height: 42px; border-radius: 13px; background: #f4f4f6; color: #505058; font-size: 19px; }
 button.attach:hover { background: #ebebef; }
