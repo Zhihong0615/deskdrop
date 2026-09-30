@@ -2,6 +2,6 @@
 Type=Application
 Name=Install DeskDrop Sender Autostart
 Comment=Open the configured receiver automatically after login
-Terminal=true
-Exec=sh -c 'cd "$(dirname "$1")" && exec ./install-autostart.sh sender' -- %k
+Terminal=false
+Exec=gtk-launch deskdrop-install-sender-autostart
 Categories=Utility;

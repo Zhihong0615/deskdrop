@@ -2,6 +2,6 @@
 Type=Application
 Name=Send to DeskDrop
 Comment=Open the configured DeskDrop receiver
-Terminal=true
-Exec=sh -c 'cd "$(dirname "$1")" && exec ./send-to-deskdrop.sh' -- %k
+Terminal=false
+Exec=gtk-launch deskdrop-send
 Categories=Utility;
