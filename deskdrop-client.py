@@ -142,6 +142,7 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.sending_text = False
         self.transfer_active = False
         self.transfer_hide_timeout = None
+        self.file_dialog = None
         self.set_default_size(1040, 700)
         self.set_size_request(760, 460)
         self.build_ui()
@@ -768,18 +769,51 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def choose_file(self, *_args):
-        chooser = Gtk.FileChooserNative.new("选择要发送的文件", self, Gtk.FileChooserAction.OPEN, "发送", "取消")
-        chooser.connect("response", self.on_file_chosen)
-        chooser.show()
+        if not self.ready or self.transfer_active or self.file_dialog is not None:
+            return
+        if hasattr(Gtk, "FileDialog"):
+            dialog = Gtk.FileDialog.new()
+            dialog.set_title("选择要发送的文件")
+            self.file_dialog = dialog
+            dialog.open(self, None, self.on_file_dialog_open)
+            return
 
-    def on_file_chosen(self, chooser, response):
-        if response == Gtk.ResponseType.ACCEPT:
-            selected = chooser.get_file()
-            if selected and selected.get_path() and self.ready and not self.transfer_active:
-                file_path = selected.get_path()
-                self.begin_transfer(Path(file_path).name, "正在发送")
-                self.run_async(self.upload_file, file_path, self.current_conversation_id)
-        chooser.destroy()
+        # Keep the native dialog alive until GTK emits its response. Without an
+        # instance reference, some PyGObject/GTK combinations close it at once.
+        dialog = Gtk.FileChooserNative.new(
+            "选择要发送的文件", self, Gtk.FileChooserAction.OPEN, "发送", "取消",
+        )
+        self.file_dialog = dialog
+        dialog.connect("response", self.on_file_chooser_response)
+        dialog.show()
+
+    def on_file_dialog_open(self, dialog, result):
+        self.file_dialog = None
+        try:
+            selected = dialog.open_finish(result)
+        except GLib.Error as error:
+            if not error.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED) and not error.matches(
+                Gtk.DialogError.quark(), Gtk.DialogError.CANCELLED,
+            ):
+                self.show_action_error(f"无法打开文件选择器：{error}")
+            return
+        self.start_selected_file(selected)
+
+    def on_file_chooser_response(self, dialog, response):
+        selected = dialog.get_file() if response == Gtk.ResponseType.ACCEPT else None
+        dialog.destroy()
+        self.file_dialog = None
+        self.start_selected_file(selected)
+
+    def start_selected_file(self, selected):
+        if not selected or not self.ready or self.transfer_active:
+            return
+        file_path = selected.get_path()
+        if not file_path:
+            self.show_action_error("请选择保存在这台电脑上的文件")
+            return
+        self.begin_transfer(Path(file_path).name, "正在发送")
+        self.run_async(self.upload_file, file_path, self.current_conversation_id)
 
     def upload_file(self, file_path, conversation_id):
         parsed = urllib.parse.urlsplit(self.base_url)
