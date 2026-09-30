@@ -14,31 +14,51 @@ from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 DEFAULT_URL = os.environ.get("DESKDROP_RECEIVER_URL", "http://10.192.185.160:8787")
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "deskdrop"
 CSS = """
-window { background: #eef1f4; color: #18212b; }
-headerbar { background: #f8fafb; border-bottom: 1px solid #dfe5e9; }
-.chat-title { font-size: 16px; font-weight: 700; }
-.chat-subtitle { color: #73808d; font-size: 12px; }
-.sidebar { background: #f8fafb; border-right: 1px solid #dfe5e9; }
-.room-selected { background: #e8f1f7; border-radius: 10px; padding: 12px; }
-.room-name { font-weight: 700; }
-.room-hint { color: #73808d; font-size: 12px; }
-.conversation { background: #eef1f4; }
-.message-bubble { background: #ffffff; border: 0; border-radius: 14px; padding: 10px 13px; }
-.message-bubble.me { background: #d8f5c8; }
-.message-sender { color: #71808b; font-size: 11px; }
-.message-text { font-size: 14px; }
-.message-time { color: #87939c; font-size: 10px; }
-.composer { background: #f8fafb; border-top: 1px solid #dfe5e9; padding: 12px; }
-.composer entry { min-height: 40px; border-radius: 18px; padding: 0 14px; }
-.status { color: #657482; font-size: 12px; padding: 4px 14px; }
-button.send { background: #168c69; color: white; border-radius: 18px; font-weight: 700; }
-button.send:hover { background: #0e7658; }
+window { background: #f5f5f7; color: #1d1d1f; }
+.app-shell { background: #f5f5f7; }
+.topbar { background: rgba(255,255,255,.96); border-bottom: 1px solid #e7e7eb; padding: 13px 22px; }
+.brand-mark { background: #147efb; color: #fff; border-radius: 11px; font-size: 15px; font-weight: 750; }
+.brand-name { font-size: 14px; font-weight: 720; letter-spacing: -.25px; }
+.room-title { font-size: 14px; font-weight: 650; }
+.room-subtitle { color: #85858d; font-size: 11px; }
+.connection-pill { background: #eff8f1; border-radius: 999px; padding: 7px 11px; }
+.connection-pill.offline { background: #fff2f0; }
+.status-dot { color: #34a853; font-size: 9px; }
+.status-dot.offline { color: #d15b52; }
+.status { color: #4f8060; font-size: 11px; }
+.status.offline { color: #a15b54; }
+.conversation { background: #f5f5f7; }
+.message-bubble { background: #fff; border: 1px solid #e9e9ed; border-radius: 17px; }
+.message-bubble.me { background: #e8f2ff; border-color: #dceaff; }
+.message-sender { color: #85858d; font-size: 10px; }
+.message-text { font-size: 13px; }
+.message-time { color: #96969d; font-size: 9px; }
+.empty-state { color: #85858d; }
+.empty-symbol { color: #147efb; font-size: 27px; }
+.empty-title { color: #303036; font-size: 14px; font-weight: 650; }
+.empty-copy { color: #85858d; font-size: 11px; }
+.composer { background: #fff; border-top: 1px solid #e7e7eb; padding: 12px 18px 16px; }
+.composer entry { min-height: 42px; border-radius: 13px; padding: 0 13px; background: #f4f4f6; border: 1px solid #ededf0; }
+button.attach { min-width: 42px; min-height: 42px; border-radius: 13px; background: #f4f4f6; color: #505058; font-size: 19px; }
+button.attach:hover { background: #ebebef; }
+button.send { min-height: 42px; padding: 0 17px; background: #147efb; color: white; border-radius: 13px; font-weight: 650; }
+button.send:hover { background: #086de4; }
+button.send:disabled, button.attach:disabled { opacity: .5; }
+.transfer-feedback { background: #fff; padding: 0 20px 10px; }
+.transfer-label { color: #64646b; font-size: 10px; }
+.transfer-label.offline { color: #a15b54; }
+.transfer-feedback progressbar trough { min-height: 4px; border-radius: 99px; background: #ececf0; }
+.transfer-feedback progressbar progress { min-height: 4px; border-radius: 99px; background: #147efb; }
+.file-name { color: #303036; font-size: 12px; font-weight: 620; }
+.file-type { min-width: 34px; min-height: 38px; border: 1px solid #e6eaf0; border-radius: 9px; color: #687180; background: #f7f8fa; font-size: 8px; font-weight: 750; }
+.file-action { min-height: 30px; padding: 0 11px; border-radius: 9px; color: #0969da; background: #f0f6ff; font-size: 11px; }
+.file-action:hover { background: #e4efff; }
 """
 
 def api_request(base_url, method, route, body=None, extra_headers=None):
@@ -92,11 +112,15 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.sender_name = "工位电脑" if host_mode else (platform.node() or "笔记本")
         self.messages_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.seen_ids = set()
+        self.message_rows = {}
         self.polling = False
         self.child_server = None
         self.ready = False
-        self.set_default_size(980, 680)
-        self.set_size_request(720, 480)
+        self.sending_text = False
+        self.transfer_active = False
+        self.transfer_hide_timeout = None
+        self.set_default_size(920, 700)
+        self.set_size_request(620, 460)
         self.build_ui()
         self.apply_css()
         self.connect("close-request", self.on_close)
@@ -105,108 +129,116 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         GLib.timeout_add_seconds(2, self.poll)
 
     def build_ui(self):
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root.add_css_class("app-shell")
         self.set_child(root)
 
-        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        side.add_css_class("sidebar")
-        side.set_size_request(235, -1)
-        side.set_margin_top(18)
-        side.set_margin_bottom(18)
-        side.set_margin_start(16)
-        side.set_margin_end(14)
-        root.append(side)
-
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        top.add_css_class("topbar")
         brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         icon = Gtk.Label(label="D")
-        icon.add_css_class("chat-title")
+        icon.add_css_class("brand-mark")
         icon.set_size_request(38, 38)
         icon.set_halign(Gtk.Align.CENTER)
         icon.set_valign(Gtk.Align.CENTER)
-        icon.add_css_class("room-selected")
         brand.append(icon)
-        brand.append(Gtk.Label(label="DeskDrop", xalign=0))
-        side.append(brand)
+        name_stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        name_stack.append(Gtk.Label(label="DeskDrop", xalign=0))
+        name_stack.get_last_child().add_css_class("brand-name")
+        name_stack.append(Gtk.Label(label="文件传输助手", xalign=0))
+        name_stack.get_last_child().add_css_class("room-subtitle")
+        brand.append(name_stack)
+        top.append(brand)
 
-        room = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        room.add_css_class("room-selected")
-        room.append(Gtk.Label(label="两台电脑的聊天", xalign=0))
-        room.get_last_child().add_css_class("room-name")
-        room.append(Gtk.Label(label="消息和文件实时同步", xalign=0))
-        room.get_last_child().add_css_class("room-hint")
-        side.append(room)
-        side.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        divider = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        divider.set_margin_top(3)
+        divider.set_margin_bottom(3)
+        top.append(divider)
 
-        room_label = "本机房间" if self.host_mode else "工位电脑"
-        peer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        avatar = Gtk.Label(label="聊")
-        avatar.add_css_class("room-selected")
-        peer.append(avatar)
-        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        names.append(Gtk.Label(label=room_label, xalign=0))
-        names.get_last_child().add_css_class("room-name")
-        names.append(Gtk.Label(label="固定设备 · 无需 PIN", xalign=0))
-        names.get_last_child().add_css_class("room-hint")
-        peer.append(names)
-        side.append(peer)
+        conversation_title = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        conversation_title.set_hexpand(True)
+        conversation_title.append(Gtk.Label(label="工位电脑" if not self.host_mode else "笔记本", xalign=0))
+        conversation_title.get_last_child().add_css_class("room-title")
+        conversation_title.append(Gtk.Label(label="固定设备 · 点对点房间", xalign=0))
+        conversation_title.get_last_child().add_css_class("room-subtitle")
+        top.append(conversation_title)
 
-        side_spacer = Gtk.Box()
-        side_spacer.set_vexpand(True)
-        side.append(side_spacer)
+        connection = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        self.connection = connection
+        connection.add_css_class("connection-pill")
+        self.status_dot = Gtk.Label(label="●")
+        self.status_dot.add_css_class("status-dot")
+        connection.append(self.status_dot)
+        self.status_label = Gtk.Label(label="正在连接…", xalign=0)
+        self.status_label.add_css_class("status")
+        self.status_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status_label.set_max_width_chars(34)
+        connection.append(self.status_label)
+        top.append(connection)
         if self.host_mode:
-            folder_btn = Gtk.Button(label="打开接收文件夹")
-            folder_btn.connect("clicked", self.open_received_folder)
-            side.append(folder_btn)
-        side.append(Gtk.Label(label="仅限已配置的两台电脑", xalign=0))
-        side.get_last_child().add_css_class("room-hint")
-
-        chat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        chat.set_hexpand(True)
-        root.append(chat)
-        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        top.set_margin_top(15)
-        top.set_margin_bottom(13)
-        top.set_margin_start(18)
-        top.set_margin_end(18)
-        top.append(Gtk.Label(label="文件传输助手", xalign=0))
-        top.get_last_child().add_css_class("chat-title")
-        endpoint = "本机接收端" if self.host_mode else self.base_url
-        top.append(Gtk.Label(label=f"{endpoint}  ·  PIN 自动免输", xalign=0))
-        top.get_last_child().add_css_class("chat-subtitle")
-        chat.append(top)
-        chat.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+            folder_button = Gtk.Button(label="接收目录")
+            folder_button.add_css_class("file-action")
+            folder_button.connect("clicked", self.open_received_folder)
+            top.append(folder_button)
+        root.append(top)
 
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.scroller.add_css_class("conversation")
         self.scroller.set_hexpand(True)
         self.scroller.set_vexpand(True)
-        self.messages_box.set_margin_top(22)
-        self.messages_box.set_margin_bottom(22)
-        self.messages_box.set_margin_start(24)
-        self.messages_box.set_margin_end(24)
+        self.messages_box.set_margin_top(25)
+        self.messages_box.set_margin_bottom(25)
+        self.messages_box.set_margin_start(44)
+        self.messages_box.set_margin_end(44)
         self.scroller.set_child(self.messages_box)
-        chat.append(self.scroller)
+        root.append(self.scroller)
 
-        self.status_label = Gtk.Label(label="正在连接房间…", xalign=0)
-        self.status_label.add_css_class("status")
-        chat.append(self.status_label)
+        self.empty_state = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.empty_state.add_css_class("empty-state")
+        self.empty_state.set_halign(Gtk.Align.CENTER)
+        self.empty_state.set_valign(Gtk.Align.CENTER)
+        self.empty_state.set_margin_top(80)
+        self.empty_state.set_margin_bottom(80)
+        self.empty_state.append(Gtk.Label(label="↗"))
+        self.empty_state.get_last_child().add_css_class("empty-symbol")
+        self.empty_state.append(Gtk.Label(label="从这里开始传文件", xalign=0))
+        self.empty_state.get_last_child().add_css_class("empty-title")
+        self.empty_state.append(Gtk.Label(label="消息和文件只在这两台设备间同步", xalign=0))
+        self.empty_state.get_last_child().add_css_class("empty-copy")
+        self.messages_box.append(self.empty_state)
+
+        self.transfer_feedback = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        self.transfer_feedback.add_css_class("transfer-feedback")
+        self.transfer_label = Gtk.Label(label="", xalign=0)
+        self.transfer_label.add_css_class("transfer-label")
+        self.transfer_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.transfer_label.set_max_width_chars(72)
+        self.transfer_feedback.append(self.transfer_label)
+        self.transfer_progress = Gtk.ProgressBar()
+        self.transfer_progress.set_show_text(True)
+        self.transfer_feedback.append(self.transfer_progress)
+        self.transfer_feedback.set_visible(False)
 
         composer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         composer.add_css_class("composer")
-        attach = Gtk.Button(label="＋ 文件")
-        attach.connect("clicked", self.choose_file)
-        composer.append(attach)
+        self.attach_button = Gtk.Button(label="＋")
+        self.attach_button.add_css_class("attach")
+        self.attach_button.set_tooltip_text("选择要发送的文件")
+        self.attach_button.connect("clicked", self.choose_file)
+        composer.append(self.attach_button)
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("输入消息，按 Enter 发送")
+        self.entry.set_placeholder_text("输入消息…")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self.send_text)
         composer.append(self.entry)
-        send = Gtk.Button(label="发送")
-        send.add_css_class("send")
-        send.connect("clicked", self.send_text)
-        composer.append(send)
-        chat.append(composer)
+        self.send_button = Gtk.Button(label="发送")
+        self.send_button.add_css_class("send")
+        self.send_button.connect("clicked", self.send_text)
+        composer.append(self.send_button)
+
+        root.append(self.transfer_feedback)
+        root.append(composer)
 
     def apply_css(self):
         provider = Gtk.CssProvider()
@@ -237,8 +269,18 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self.set_status, f"启动失败：{error}", False)
 
     def set_status(self, text, online):
-        self.status_label.set_text(("●  " if online else "○  ") + text)
+        self.status_label.set_text(text)
+        if online:
+            self.status_label.remove_css_class("offline")
+            self.status_dot.remove_css_class("offline")
+            self.connection.remove_css_class("offline")
+        else:
+            self.status_label.add_css_class("offline")
+            self.status_dot.add_css_class("offline")
+            self.connection.add_css_class("offline")
         self.ready = online
+        self.attach_button.set_sensitive(online and not self.transfer_active)
+        self.send_button.set_sensitive(online and not self.sending_text)
         return GLib.SOURCE_REMOVE
 
     def poll(self):
@@ -263,15 +305,37 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         finally:
             self.polling = False
 
-    def show_messages(self, messages):
+    def show_messages(self, messages, force_scroll=False, reconcile=True):
+        should_scroll = force_scroll or self.is_near_bottom()
+        added = False
+        current_ids = {message.get("id") for message in messages if message.get("id")}
         for message in messages:
             message_id = message.get("id")
             if not message_id or message_id in self.seen_ids:
                 continue
             self.seen_ids.add(message_id)
-            self.add_message(message)
-        GLib.idle_add(self.scroll_to_bottom)
+            if self.empty_state.get_parent() is self.messages_box:
+                self.messages_box.remove(self.empty_state)
+            self.message_rows[message_id] = self.add_message(message)
+            added = True
+        removed = False
+        if reconcile:
+            for message_id in self.seen_ids - current_ids:
+                row = self.message_rows.pop(message_id, None)
+                if row and row.get_parent() is self.messages_box:
+                    self.messages_box.remove(row)
+                    removed = True
+                self.seen_ids.discard(message_id)
+        if not current_ids and self.empty_state.get_parent() is None:
+            self.messages_box.append(self.empty_state)
+        if (added or removed) and should_scroll:
+            GLib.idle_add(self.scroll_to_bottom)
         return GLib.SOURCE_REMOVE
+
+    def is_near_bottom(self):
+        adjustment = self.scroller.get_vadjustment()
+        distance = adjustment.get_upper() - adjustment.get_page_size() - adjustment.get_value()
+        return distance <= 96
 
     def scroll_to_bottom(self):
         adjustment = self.scroller.get_vadjustment()
@@ -282,7 +346,7 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         mine = message.get("senderId") == self.sender_id
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         row.set_halign(Gtk.Align.END if mine else Gtk.Align.START)
-        bubble = Gtk.Frame()
+        bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         bubble.add_css_class("message-bubble")
         if mine:
             bubble.add_css_class("me")
@@ -297,13 +361,22 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             content.append(who)
         if message.get("type") == "file":
             file_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            file_box.append(Gtk.Label(label="📄"))
+            extension = Path(message.get("name", "")).suffix.lower().lstrip(".")[:4].upper() or "FILE"
+            badge = Gtk.Label(label=extension)
+            badge.add_css_class("file-type")
+            file_box.append(badge)
             details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-            details.append(Gtk.Label(label=message.get("name", "文件"), xalign=0))
+            details.set_hexpand(True)
+            filename = Gtk.Label(label=message.get("name", "文件"), xalign=0)
+            filename.set_ellipsize(Pango.EllipsizeMode.END)
+            filename.set_max_width_chars(32)
+            filename.add_css_class("file-name")
+            details.append(filename)
             details.append(Gtk.Label(label=human_size(message.get("size")), xalign=0))
             details.get_last_child().add_css_class("message-sender")
             file_box.append(details)
             action = Gtk.Button(label="打开" if self.host_mode else "下载")
+            action.add_css_class("file-action")
             action.connect("clicked", self.open_file, message)
             file_box.append(action)
             content.append(file_box)
@@ -311,7 +384,7 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             text = Gtk.Label(label=message.get("text", ""), xalign=0, yalign=0)
             text.set_wrap(True)
             text.set_selectable(True)
-            text.set_max_width_chars(48)
+            text.set_max_width_chars(58)
             text.add_css_class("message-text")
             content.append(text)
         from datetime import datetime
@@ -322,15 +395,21 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         timestamp = Gtk.Label(label=time_text, xalign=1)
         timestamp.add_css_class("message-time")
         content.append(timestamp)
-        bubble.set_child(content)
+        bubble.append(content)
         row.append(bubble)
         self.messages_box.append(row)
+        return row
 
     def send_text(self, *_args):
+        if self.sending_text or not self.ready:
+            return
         value = self.entry.get_text().strip()
         if not value:
             return
+        self.sending_text = True
         self.entry.set_text("")
+        self.entry.set_sensitive(False)
+        self.send_button.set_sensitive(False)
         self.run_async(self.post_text, value)
 
     def post_text(self, value):
@@ -339,7 +418,28 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         })
         if status >= 300:
             raise RuntimeError(response.get("error", "消息发送失败"))
-        GLib.idle_add(self.show_messages, [response.get("message", {})])
+        GLib.idle_add(self.finish_text_send, response.get("message", {}))
+
+    def finish_text_send(self, message):
+        self.sending_text = False
+        self.entry.set_sensitive(True)
+        self.send_button.set_sensitive(self.ready)
+        if message:
+            self.show_messages([message], force_scroll=True, reconcile=False)
+        self.entry.grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    def fail_text_send(self, value, error):
+        self.sending_text = False
+        self.entry.set_text(value)
+        self.entry.set_sensitive(True)
+        self.send_button.set_sensitive(self.ready)
+        self.entry.grab_focus()
+        self.set_status(f"消息未发送：{error}", self.ready)
+        self.status_label.add_css_class("offline")
+        self.status_dot.add_css_class("offline")
+        self.connection.add_css_class("offline")
+        return GLib.SOURCE_REMOVE
 
     def choose_file(self, *_args):
         chooser = Gtk.FileChooserNative.new("选择要发送的文件", self, Gtk.FileChooserAction.OPEN, "发送", "取消")
@@ -349,8 +449,10 @@ class DeskDropWindow(Gtk.ApplicationWindow):
     def on_file_chosen(self, chooser, response):
         if response == Gtk.ResponseType.ACCEPT:
             selected = chooser.get_file()
-            if selected and selected.get_path():
-                self.run_async(self.upload_file, selected.get_path())
+            if selected and selected.get_path() and self.ready and not self.transfer_active:
+                file_path = selected.get_path()
+                self.begin_transfer(Path(file_path).name, "正在发送")
+                self.run_async(self.upload_file, file_path)
         chooser.destroy()
 
     def upload_file(self, file_path):
@@ -370,6 +472,8 @@ class DeskDropWindow(Gtk.ApplicationWindow):
                 if not block:
                     break
                 conn.send(block)
+                if size:
+                    GLib.idle_add(self.update_transfer, min(1.0, source.tell() / size))
         response = conn.getresponse()
         data = response.read()
         result = json.loads(data.decode("utf-8")) if data else {}
@@ -377,7 +481,47 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         conn.close()
         if code >= 300:
             raise RuntimeError(result.get("error", "文件发送失败"))
-        GLib.idle_add(self.set_status, f"文件已发送：{name}", True)
+        GLib.idle_add(self.finish_transfer, True, f"已发送 · {name}")
+
+    def begin_transfer(self, name, action):
+        if self.transfer_hide_timeout:
+            GLib.source_remove(self.transfer_hide_timeout)
+            self.transfer_hide_timeout = None
+        self.transfer_active = True
+        self.transfer_label.remove_css_class("offline")
+        self.transfer_label.set_text(f"{action} · {name}")
+        self.transfer_progress.set_fraction(0)
+        self.transfer_progress.set_text("准备中")
+        self.transfer_feedback.set_visible(True)
+        self.attach_button.set_sensitive(False)
+        return GLib.SOURCE_REMOVE
+
+    def update_transfer(self, fraction):
+        fraction = max(0.0, min(1.0, fraction))
+        self.transfer_progress.set_fraction(fraction)
+        self.transfer_progress.set_text(f"{round(fraction * 100)}%")
+        return GLib.SOURCE_REMOVE
+
+    def finish_transfer(self, success, message):
+        self.transfer_active = False
+        self.transfer_label.set_text(message)
+        if success:
+            self.transfer_progress.set_fraction(1)
+            self.transfer_progress.set_text("完成")
+        else:
+            self.transfer_label.add_css_class("offline")
+            self.transfer_progress.set_text("未完成")
+        self.attach_button.set_sensitive(self.ready)
+        if self.transfer_hide_timeout:
+            GLib.source_remove(self.transfer_hide_timeout)
+        self.transfer_hide_timeout = GLib.timeout_add_seconds(5, self.hide_transfer_feedback)
+        return GLib.SOURCE_REMOVE
+
+    def hide_transfer_feedback(self):
+        self.transfer_feedback.set_visible(False)
+        self.transfer_label.remove_css_class("offline")
+        self.transfer_hide_timeout = None
+        return GLib.SOURCE_REMOVE
 
     def open_file(self, _button, message):
         if self.host_mode:
@@ -387,41 +531,71 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             else:
                 self.set_status("这个旧文件已不在接收目录", False)
             return
-        self.run_async(self.download_file, message)
+        if self.transfer_active or not self.ready:
+            return
+        _button.set_sensitive(False)
+        self.begin_transfer(Path(message.get("name", "file")).name, "正在下载")
+        self.run_async(self.download_file, message, _button)
 
-    def download_file(self, message):
+    def download_file(self, message, button):
         parsed = urllib.parse.urlsplit(self.base_url)
         file_id = urllib.parse.quote(message.get("fileId", ""), safe="")
         conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=60)
-        conn.request("GET", f"/api/files/{file_id}")
-        response = conn.getresponse()
-        if response.status >= 300:
-            detail = response.read().decode("utf-8", "replace")
+        name = Path(message.get("name", "file")).name
+        temporary = None
+        temporary_created = False
+        try:
+            conn.request("GET", f"/api/files/{file_id}")
+            response = conn.getresponse()
+            if response.status >= 300:
+                detail = response.read().decode("utf-8", "replace")
+                raise RuntimeError(detail or "文件下载失败")
+            total = int(response.getheader("Content-Length") or 0)
+            downloads = Path.home() / "Downloads"
+            downloads.mkdir(parents=True, exist_ok=True)
+            target = downloads / name
+            stem, suffix = target.stem, target.suffix
+            index = 1
+            while target.exists():
+                target = downloads / f"{stem} ({index}){suffix}"
+                index += 1
+            temporary = downloads / f".{target.name}.{uuid.uuid4().hex}.part"
+            with temporary.open("xb") as output:
+                temporary_created = True
+                received = 0
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    output.write(block)
+                    received += len(block)
+                    if total:
+                        GLib.idle_add(self.update_transfer, min(1.0, received / total))
+            if total and received != total:
+                raise RuntimeError(f"下载不完整：收到 {received} / {total} 字节")
+            os.replace(temporary, target)
+        except Exception:
+            if temporary_created and temporary is not None:
+                temporary.unlink(missing_ok=True)
+            raise
+        finally:
             conn.close()
-            raise RuntimeError(detail or "文件下载失败")
-        downloads = Path.home() / "Downloads"
-        downloads.mkdir(parents=True, exist_ok=True)
-        target = downloads / Path(message.get("name", "file")).name
-        stem, suffix = target.stem, target.suffix
-        index = 1
-        while target.exists():
-            target = downloads / f"{stem} ({index}){suffix}"
-            index += 1
-        with target.open("wb") as output:
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                output.write(block)
-        conn.close()
-        GLib.idle_add(self.set_status, f"已下载到：{target}", True)
+        GLib.idle_add(self.finish_transfer, True, f"已下载到 Downloads · {name}")
+        GLib.idle_add(button.set_sensitive, True)
 
     def run_async(self, function, *args):
         def work():
             try:
                 function(*args)
             except Exception as error:
-                GLib.idle_add(self.set_status, f"操作失败：{error}", False)
+                if function.__name__ == "post_text":
+                    GLib.idle_add(self.fail_text_send, args[0], str(error))
+                elif function.__name__ in {"upload_file", "download_file"}:
+                    GLib.idle_add(self.finish_transfer, False, f"传输失败：{error}")
+                    if function.__name__ == "download_file":
+                        GLib.idle_add(args[1].set_sensitive, True)
+                else:
+                    GLib.idle_add(self.set_status, f"操作失败：{error}", self.ready)
         threading.Thread(target=work, daemon=True).start()
 
     def open_received_folder(self, *_args):
