@@ -571,6 +571,8 @@ class DeskDropWindow(Gtk.ApplicationWindow):
                     received += len(block)
                     if total:
                         GLib.idle_add(self.update_transfer, min(1.0, received / total))
+            if total and received != total:
+                raise RuntimeError(f"下载不完整：收到 {received} / {total} 字节")
             os.replace(temporary, target)
         except Exception:
             if temporary_created and temporary is not None:
