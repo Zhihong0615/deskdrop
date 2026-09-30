@@ -46,12 +46,13 @@ else
       aarch64|arm64) arch=arm64 ;;
       *) echo "Unsupported processor architecture: $machine" >&2; exit 1 ;;
     esac
-    version=$(curl -fsSL --max-time 30 https://nodejs.org/dist/index.json | sed -n '/"lts":"[^"]*"/{s/.*"version":"\([^"]*\)".*/\1/p;q;}')
-    [[ -n "$version" ]] || { echo 'Could not find a current Node.js LTS release.' >&2; exit 1; }
-    archive="node-$version-$platform-$arch.tar.xz"
     mkdir -p "$cache_dir"
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT
+    curl -fsSL --max-time 30 https://nodejs.org/dist/index.json -o "$temp_dir/index.json"
+    version=$(sed -n '/"lts":"[^"]*"/{s/.*"version":"\([^"]*\)".*/\1/p;q;}' "$temp_dir/index.json")
+    [[ -n "$version" ]] || { echo 'Could not find a current Node.js LTS release.' >&2; exit 1; }
+    archive="node-$version-$platform-$arch.tar.xz"
     curl -fL --retry 2 --connect-timeout 15 "https://nodejs.org/dist/$version/$archive" -o "$temp_dir/$archive"
     tar -xJf "$temp_dir/$archive" -C "$temp_dir"
     cp "$temp_dir/node-$version-$platform-$arch/bin/node" "$portable_node"
