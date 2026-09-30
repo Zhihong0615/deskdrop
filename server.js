@@ -29,8 +29,17 @@ const sessionTtlMs = 7 * 24 * 60 * 60 * 1000;
 const stateDir = path.resolve(process.env.DESKDROP_STATE_DIR || path.join(homedir(), '.local', 'state', 'deskdrop'));
 const sessionsFile = path.join(stateDir, 'sessions.json');
 const messagesFile = path.join(stateDir, 'messages.json');
+const conversationsFile = path.join(stateDir, 'conversations.json');
 const trustedClients = (process.env.DESKDROP_TRUSTED_CLIENTS || '').split(',').map((entry) => entry.trim()).filter(Boolean);
 const maxMessages = 500;
+const maxConversations = 100;
+const defaultConversationId = 'default';
+const conversations = new Map([[defaultConversationId, {
+  id: defaultConversationId,
+  name: '文件传输助手',
+  createdAt: 0,
+  updatedAt: 0,
+}]]);
 const messages = [];
 const eventClients = new Set();
 const publicFiles = new Map([
@@ -56,11 +65,35 @@ try {
 }
 
 try {
+  const saved = JSON.parse(await readFile(conversationsFile, 'utf8'));
+  if (Array.isArray(saved)) {
+    for (const conversation of saved) {
+      if (conversation && typeof conversation.id === 'string' && /^[a-f0-9-]{36}$/.test(conversation.id)
+        && typeof conversation.name === 'string' && conversation.name.trim()
+        && Number.isFinite(conversation.createdAt) && Number.isFinite(conversation.updatedAt)) {
+        conversations.set(conversation.id, {
+          id: conversation.id,
+          name: conversation.name.trim().slice(0, 64),
+          createdAt: conversation.createdAt,
+          updatedAt: conversation.updatedAt,
+        });
+      }
+    }
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') console.warn(`Could not restore conversations: ${error.message}`);
+}
+
+try {
   const saved = JSON.parse(await readFile(messagesFile, 'utf8'));
   if (Array.isArray(saved)) {
     for (const message of saved.slice(-maxMessages)) {
       if (message && typeof message.id === 'string' && ['text', 'file'].includes(message.type)
-        && Number.isFinite(message.createdAt) && typeof message.sender === 'string') messages.push(message);
+        && Number.isFinite(message.createdAt) && typeof message.sender === 'string') {
+        const conversationId = typeof message.conversationId === 'string' && conversations.has(message.conversationId)
+          ? message.conversationId : defaultConversationId;
+        messages.push({ ...message, conversationId });
+      }
     }
   }
 } catch (error) {
@@ -84,6 +117,13 @@ async function persistMessages() {
   await rename(temp, messagesFile);
 }
 
+async function persistConversations() {
+  const temp = `${conversationsFile}.${randomUUID()}.tmp`;
+  await writeFile(temp, JSON.stringify([...conversations.values()]), { mode: 0o600 });
+  await chmod(temp, 0o600);
+  await rename(temp, conversationsFile);
+}
+
 function publish(event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const client of eventClients) {
@@ -103,6 +143,41 @@ function cleanSender(value) {
 function cleanSenderId(value) {
   const id = String(value || '');
   return /^[a-zA-Z0-9_-]{8,64}$/.test(id) ? id : 'unknown-device';
+}
+
+function cleanConversationName(value) {
+  const name = String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  if (!name) throw Object.assign(new Error('聊天框名称不能为空。'), { status: 400 });
+  if ([...name].length > 64) throw Object.assign(new Error('聊天框名称最多 64 个字符。'), { status: 413 });
+  return name;
+}
+
+function getConversation(id, res) {
+  const conversation = conversations.get(id);
+  if (!conversation) json(res, 404, { error: '找不到这个聊天框。' });
+  return conversation || null;
+}
+
+function touchConversation(id, createdAt = Date.now()) {
+  const conversation = conversations.get(id);
+  if (conversation) conversation.updatedAt = Math.max(conversation.updatedAt || 0, createdAt);
+}
+
+async function messageHistory() {
+  const knownFiles = new Set(messages.filter((message) => message.type === 'file').map((message) => message.fileId));
+  const files = await listFiles();
+  const legacy = files.filter((file) => !knownFiles.has(file.id)).map((file) => ({
+    id: `legacy-${file.id}`,
+    type: 'file',
+    conversationId: defaultConversationId,
+    fileId: file.id,
+    name: file.name,
+    size: file.size,
+    sender: '已接收文件',
+    senderId: 'legacy',
+    createdAt: file.modified,
+  }));
+  return [...messages, ...legacy].sort((a, b) => a.createdAt - b.createdAt);
 }
 
 function headers(res) {
@@ -132,8 +207,9 @@ function getSession(req) {
 }
 
 function requireSession(req, res) {
-  if (getSession(req) || isTrustedClient(req)) return true;
-  json(res, 401, { error: 'Please enter the PIN to continue.' });
+  if (trustedClients.length ? isTrustedClient(req) : Boolean(getSession(req))) return true;
+  const error = trustedClients.length ? 'This computer is not in the trusted device list.' : 'Please enter the PIN to continue.';
+  json(res, 401, { error });
   return false;
 }
 
@@ -229,7 +305,8 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && route === '/api/status') {
-    json(res, 200, { authenticated: Boolean(getSession(req) || isTrustedClient(req)), room: hostname() });
+    const authenticated = trustedClients.length ? isTrustedClient(req) : Boolean(getSession(req));
+    json(res, 200, { authenticated, room: hostname() });
     return;
   }
 
@@ -278,6 +355,91 @@ async function handle(req, res) {
 
   if (route.startsWith('/api/') && !requireSession(req, res)) return;
 
+  if (req.method === 'GET' && route === '/api/conversations') {
+    const history = await messageHistory();
+    const list = [...conversations.values()].map((conversation) => {
+      const roomMessages = history.filter((message) => message.conversationId === conversation.id);
+      const lastMessage = roomMessages.reduce((latest, message) => !latest || message.createdAt > latest.createdAt ? message : latest, null);
+      return {
+        ...conversation,
+        updatedAt: Math.max(conversation.updatedAt || 0, lastMessage?.createdAt || 0),
+        messageCount: roomMessages.length,
+        lastMessage: lastMessage ? {
+          type: lastMessage.type,
+          text: lastMessage.type === 'text' ? lastMessage.text : lastMessage.name,
+          createdAt: lastMessage.createdAt,
+        } : null,
+      };
+    });
+    json(res, 200, { conversations: list });
+    return;
+  }
+
+  if (req.method === 'POST' && route === '/api/conversations') {
+    const body = await readJson(req, 4096);
+    const name = cleanConversationName(body.name);
+    if (conversations.size >= maxConversations) {
+      json(res, 413, { error: `最多可创建 ${maxConversations} 个聊天框。` });
+      return;
+    }
+    const normalizedName = name.toLocaleLowerCase();
+    if ([...conversations.values()].some((conversation) => conversation.name.toLocaleLowerCase() === normalizedName)) {
+      json(res, 409, { error: '已经有同名聊天框了。' });
+      return;
+    }
+    const now = Date.now();
+    const conversation = { id: randomUUID(), name, createdAt: now, updatedAt: now };
+    conversations.set(conversation.id, conversation);
+    await persistConversations();
+    publish({ type: 'conversations', conversation });
+    json(res, 201, { conversation });
+    return;
+  }
+
+  const conversationMatch = route.match(/^\/api\/conversations\/([a-f0-9-]{36})$/);
+  if (req.method === 'PATCH' && conversationMatch) {
+    const conversation = getConversation(conversationMatch[1], res);
+    if (!conversation) return;
+    const body = await readJson(req, 4096);
+    const name = cleanConversationName(body.name);
+    const normalizedName = name.toLocaleLowerCase();
+    if ([...conversations.values()].some((item) => item.id !== conversation.id
+      && item.name.toLocaleLowerCase() === normalizedName)) {
+      json(res, 409, { error: '已经有同名聊天框了。' });
+      return;
+    }
+    conversation.name = name;
+    conversation.updatedAt = Date.now();
+    await persistConversations();
+    publish({ type: 'conversations', conversation });
+    json(res, 200, { conversation });
+    return;
+  }
+
+  if (req.method === 'GET' && route === '/api/search') {
+    const query = (url.searchParams.get('q') || '').trim();
+    if (!query) { json(res, 400, { error: '请输入搜索内容。' }); return; }
+    if ([...query].length > 200) { json(res, 413, { error: '搜索内容最多 200 个字符。' }); return; }
+    const needle = query.toLocaleLowerCase();
+    const conversationId = url.searchParams.get('conversationId');
+    if (conversationId && !getConversation(conversationId, res)) return;
+    const matchingConversations = [...conversations.values()]
+      .filter((conversation) => conversation.name.toLocaleLowerCase().includes(needle))
+      .slice(0, 100);
+    const matchingMessages = (await messageHistory())
+      .filter((message) => (!conversationId || message.conversationId === conversationId)
+        && conversations.has(message.conversationId)
+        && String(message.text || message.name || '').toLocaleLowerCase().includes(needle))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 100)
+      .map((message) => ({
+        ...message,
+        conversationName: conversations.get(message.conversationId).name,
+      }));
+    json(res, 200, { query, conversations: matchingConversations, messages: matchingMessages });
+    return;
+  }
+
   if (req.method === 'GET' && route === '/api/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -298,38 +460,33 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && route === '/api/messages') {
-    const knownFiles = new Set(messages.filter((message) => message.type === 'file').map((message) => message.fileId));
-    const files = await listFiles();
-    const legacy = files.filter((file) => !knownFiles.has(file.id)).map((file) => ({
-      id: `legacy-${file.id}`,
-      type: 'file',
-      fileId: file.id,
-      name: file.name,
-      size: file.size,
-      sender: '已接收文件',
-      senderId: 'legacy',
-      createdAt: file.modified,
-    }));
-    const history = [...messages, ...legacy].sort((a, b) => a.createdAt - b.createdAt);
-    json(res, 200, { messages: history });
+    const conversationId = url.searchParams.get('conversationId') || defaultConversationId;
+    if (!getConversation(conversationId, res)) return;
+    const history = (await messageHistory()).filter((message) => message.conversationId === conversationId);
+    json(res, 200, { conversationId, messages: history });
     return;
   }
 
   if (req.method === 'POST' && route === '/api/messages') {
     const body = await readJson(req, 16 * 1024);
+    const conversationId = String(body.conversationId || defaultConversationId);
+    if (!getConversation(conversationId, res)) return;
     const text = String(body.text || '').trim();
     if (!text) { json(res, 400, { error: '消息不能为空。' }); return; }
     if (text.length > 2000) { json(res, 413, { error: '消息最多 2000 个字符。' }); return; }
     const message = {
       id: randomUUID(),
       type: 'text',
+      conversationId,
       text,
       sender: cleanSender(body.sender),
       senderId: cleanSenderId(body.senderId),
       createdAt: Date.now(),
     };
     messages.push(message);
+    touchConversation(conversationId, message.createdAt);
     await persistMessages();
+    await persistConversations();
     publish({ type: 'message', message });
     json(res, 201, { message });
     return;
@@ -341,6 +498,11 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && route === '/api/upload') {
+    const conversationId = url.searchParams.get('conversationId') || defaultConversationId;
+    if (!getConversation(conversationId, res)) {
+      req.resume();
+      return;
+    }
     const rawName = url.searchParams.get('name') || 'file';
     const filename = safeFilename(rawName);
     const id = `${randomUUID()}__${filename}`;
@@ -366,6 +528,7 @@ async function handle(req, res) {
       const message = {
         id: randomUUID(),
         type: 'file',
+        conversationId,
         fileId: id,
         name: filename,
         size: received,
@@ -374,7 +537,9 @@ async function handle(req, res) {
         createdAt: file.mtimeMs,
       };
       messages.push(message);
+      touchConversation(conversationId, message.createdAt);
       await persistMessages();
+      await persistConversations();
       publish({ type: 'message', message });
       json(res, 201, { id, name: filename, size: received });
     } catch (error) {
