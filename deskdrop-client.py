@@ -22,6 +22,23 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
 CSS = """
 window { background: #f5f5f7; color: #1d1d1f; }
 .app-shell { background: #f5f5f7; }
+.sidebar { background: #fff; border-right: 1px solid #e7e7eb; padding: 14px 10px; }
+.sidebar-brand { padding: 4px 7px 12px; }
+.sidebar-heading { color: #85858d; font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 9px 8px 5px; }
+.room-list-button { min-height: 54px; padding: 7px 9px; border-radius: 10px; background: transparent; }
+.room-list-button:hover { background: #f5f6f8; }
+.room-list-button.selected { background: #edf4ff; }
+.room-list-name { color: #27272c; font-size: 12px; font-weight: 650; }
+.room-list-preview { color: #8a8a92; font-size: 10px; }
+.search-result-button { min-height: 48px; padding: 7px 9px; border-radius: 9px; background: transparent; }
+.search-result-button:hover { background: #f5f6f8; }
+.search-result-title { color: #34343a; font-size: 11px; font-weight: 620; }
+.search-result-preview { color: #85858d; font-size: 10px; }
+.search-empty { color: #85858d; font-size: 11px; padding: 16px 8px; }
+.conversation scrolledwindow { background: transparent; }
+.message-bubble.search-hit { border: 2px solid #147efb; }
+.icon-action { min-width: 34px; min-height: 34px; border-radius: 10px; color: #52525a; background: #f1f2f4; }
+.icon-action:hover { background: #e8e9ed; }
 .topbar { background: rgba(255,255,255,.96); border-bottom: 1px solid #e7e7eb; padding: 13px 22px; }
 .brand-mark { background: #147efb; color: #fff; border-radius: 11px; font-size: 15px; font-weight: 750; }
 .brand-name { font-size: 14px; font-weight: 720; letter-spacing: -.25px; }
@@ -110,6 +127,12 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.base_url = "http://127.0.0.1:8787" if host_mode else base_url.rstrip("/")
         self.sender_id = device_id()
         self.sender_name = "工位电脑" if host_mode else (platform.node() or "笔记本")
+        self.current_conversation_id = "default"
+        self.conversations = []
+        self.search_timeout = None
+        self.search_generation = 0
+        self.pending_message_target = None
+        self.scroll_when_loaded = True
         self.messages_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.seen_ids = set()
         self.message_rows = {}
@@ -119,8 +142,8 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.sending_text = False
         self.transfer_active = False
         self.transfer_hide_timeout = None
-        self.set_default_size(920, 700)
-        self.set_size_request(620, 460)
+        self.set_default_size(1040, 700)
+        self.set_size_request(760, 460)
         self.build_ui()
         self.apply_css()
         self.connect("close-request", self.on_close)
@@ -129,39 +152,75 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         GLib.timeout_add_seconds(2, self.poll)
 
     def build_ui(self):
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         root.add_css_class("app-shell")
         self.set_child(root)
 
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        top.add_css_class("topbar")
-        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        sidebar.add_css_class("sidebar")
+        sidebar.set_size_request(265, -1)
+        self.sidebar = sidebar
+
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        brand.add_css_class("sidebar-brand")
         icon = Gtk.Label(label="D")
         icon.add_css_class("brand-mark")
-        icon.set_size_request(38, 38)
-        icon.set_halign(Gtk.Align.CENTER)
-        icon.set_valign(Gtk.Align.CENTER)
+        icon.set_size_request(34, 34)
         brand.append(icon)
-        name_stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        name_stack.append(Gtk.Label(label="DeskDrop", xalign=0))
-        name_stack.get_last_child().add_css_class("brand-name")
-        name_stack.append(Gtk.Label(label="文件传输助手", xalign=0))
-        name_stack.get_last_child().add_css_class("room-subtitle")
-        brand.append(name_stack)
-        top.append(brand)
+        brand_name = Gtk.Label(label="DeskDrop", xalign=0)
+        brand_name.add_css_class("brand-name")
+        brand_name.set_hexpand(True)
+        brand.append(brand_name)
+        self.new_conversation_button = Gtk.Button(label="＋")
+        self.new_conversation_button.add_css_class("icon-action")
+        self.new_conversation_button.set_tooltip_text("新建聊天框")
+        self.new_conversation_button.connect("clicked", self.prompt_create_conversation)
+        brand.append(self.new_conversation_button)
+        sidebar.append(brand)
 
-        divider = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        divider.set_margin_top(3)
-        divider.set_margin_bottom(3)
-        top.append(divider)
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("搜索聊天框和聊天记录")
+        self.search_entry.connect("search-changed", self.on_search_changed)
+        sidebar.append(self.search_entry)
 
+        self.sidebar_stack = Gtk.Stack()
+        self.sidebar_stack.set_vexpand(True)
+        self.sidebar_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.room_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.room_scroller = Gtk.ScrolledWindow()
+        self.room_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.room_scroller.set_child(self.room_list)
+        self.sidebar_stack.add_named(self.room_scroller, "rooms")
+
+        self.search_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        self.search_scroller = Gtk.ScrolledWindow()
+        self.search_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.search_scroller.set_child(self.search_results)
+        self.sidebar_stack.add_named(self.search_scroller, "search")
+        sidebar.append(self.sidebar_stack)
+        root.append(sidebar)
+
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        main.set_hexpand(True)
+        main.add_css_class("app-shell")
+        root.append(main)
+
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        top.add_css_class("topbar")
         conversation_title = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         conversation_title.set_hexpand(True)
-        conversation_title.append(Gtk.Label(label="工位电脑" if not self.host_mode else "笔记本", xalign=0))
-        conversation_title.get_last_child().add_css_class("room-title")
+        self.active_room_label = Gtk.Label(label="文件传输助手", xalign=0)
+        self.active_room_label.add_css_class("room-title")
+        conversation_title.append(self.active_room_label)
         conversation_title.append(Gtk.Label(label="固定设备 · 点对点房间", xalign=0))
         conversation_title.get_last_child().add_css_class("room-subtitle")
         top.append(conversation_title)
+
+        self.rename_conversation_button = Gtk.Button(label="重命名")
+        self.rename_conversation_button.add_css_class("file-action")
+        self.rename_conversation_button.set_tooltip_text("重命名当前聊天框")
+        self.rename_conversation_button.connect("clicked", self.prompt_rename_conversation)
+        top.append(self.rename_conversation_button)
 
         connection = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
         self.connection = connection
@@ -180,7 +239,7 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             folder_button.add_css_class("file-action")
             folder_button.connect("clicked", self.open_received_folder)
             top.append(folder_button)
-        root.append(top)
+        main.append(top)
 
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -192,7 +251,7 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.messages_box.set_margin_start(44)
         self.messages_box.set_margin_end(44)
         self.scroller.set_child(self.messages_box)
-        root.append(self.scroller)
+        main.append(self.scroller)
 
         self.empty_state = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.empty_state.add_css_class("empty-state")
@@ -237,8 +296,8 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.send_button.connect("clicked", self.send_text)
         composer.append(self.send_button)
 
-        root.append(self.transfer_feedback)
-        root.append(composer)
+        main.append(self.transfer_feedback)
+        main.append(composer)
 
     def apply_css(self):
         provider = Gtk.CssProvider()
@@ -246,6 +305,252 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         display = Gdk.Display.get_default()
         if display:
             Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def clear_box(self, box):
+        child = box.get_first_child()
+        while child:
+            following = child.get_next_sibling()
+            box.remove(child)
+            child = following
+
+    def update_conversations(self, conversations):
+        self.conversations = conversations or []
+        self.clear_box(self.room_list)
+        heading = Gtk.Label(label="聊天框", xalign=0)
+        heading.add_css_class("sidebar-heading")
+        self.room_list.append(heading)
+        ordered = sorted(self.conversations, key=lambda item: (item.get("id") != "default", -int(item.get("updatedAt") or 0)))
+        for conversation in ordered:
+            conversation_id = conversation.get("id")
+            button = Gtk.Button()
+            button.set_has_frame(False)
+            button.add_css_class("room-list-button")
+            if conversation_id == self.current_conversation_id:
+                button.add_css_class("selected")
+            details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            details.set_halign(Gtk.Align.FILL)
+            name = Gtk.Label(label=conversation.get("name", "未命名聊天"), xalign=0)
+            name.set_ellipsize(Pango.EllipsizeMode.END)
+            name.set_max_width_chars(28)
+            name.add_css_class("room-list-name")
+            details.append(name)
+            last = conversation.get("lastMessage") or {}
+            preview = str(last.get("text") or "还没有消息")
+            preview_label = Gtk.Label(label=preview, xalign=0)
+            preview_label.set_ellipsize(Pango.EllipsizeMode.END)
+            preview_label.set_max_width_chars(32)
+            preview_label.add_css_class("room-list-preview")
+            details.append(preview_label)
+            button.set_child(details)
+            button.connect("clicked", self.open_conversation, conversation_id)
+            self.room_list.append(button)
+
+        current = next((item for item in self.conversations if item.get("id") == self.current_conversation_id), None)
+        if current:
+            self.active_room_label.set_text(current.get("name", "聊天"))
+        return GLib.SOURCE_REMOVE
+
+    def open_conversation(self, _button, conversation_id, target_message_id=None):
+        if not conversation_id:
+            return
+        if conversation_id == self.current_conversation_id:
+            if target_message_id:
+                self.scroll_to_message(target_message_id)
+            return
+        self.current_conversation_id = conversation_id
+        self.pending_message_target = target_message_id
+        self.scroll_when_loaded = True
+        self.seen_ids.clear()
+        self.message_rows.clear()
+        self.clear_box(self.messages_box)
+        self.messages_box.append(self.empty_state)
+        selected = next((item for item in self.conversations if item.get("id") == conversation_id), None)
+        self.active_room_label.set_text(selected.get("name", "聊天") if selected else "聊天")
+        self.update_conversations(self.conversations)
+        self.poll()
+
+    def prompt_conversation_name(self, title, initial, callback):
+        dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("确定", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.set_default_size(370, -1)
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(14)
+        content.set_margin_bottom(14)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("输入聊天框名称")
+        entry.set_max_length(64)
+        entry.set_text(initial or "")
+        entry.connect("activate", lambda *_args: dialog.response(Gtk.ResponseType.OK))
+        content.append(entry)
+
+        def on_response(_dialog, response):
+            value = entry.get_text().strip()
+            dialog.destroy()
+            if response == Gtk.ResponseType.OK and value:
+                callback(value)
+
+        dialog.connect("response", on_response)
+        dialog.present()
+        entry.grab_focus()
+        entry.set_position(-1)
+
+    def prompt_create_conversation(self, *_args):
+        self.prompt_conversation_name("新建聊天框", "", lambda name: self.run_async(self.create_conversation, name))
+
+    def create_conversation(self, name):
+        status, response = api_request(self.base_url, "POST", "/api/conversations", {"name": name})
+        if status >= 300:
+            raise RuntimeError(response.get("error", "创建聊天框失败"))
+        conversation = response.get("conversation") or {}
+        GLib.idle_add(self.finish_create_conversation, conversation)
+
+    def finish_create_conversation(self, conversation):
+        if conversation.get("id"):
+            self.update_conversations([*self.conversations, conversation])
+            self.open_conversation(None, conversation["id"])
+        return GLib.SOURCE_REMOVE
+
+    def prompt_rename_conversation(self, *_args):
+        current = next((item for item in self.conversations if item.get("id") == self.current_conversation_id), None)
+        if current:
+            conversation_id = self.current_conversation_id
+            self.prompt_conversation_name(
+                "重命名聊天框", current.get("name", ""),
+                lambda name: self.run_async(self.rename_conversation, conversation_id, name),
+            )
+
+    def rename_conversation(self, conversation_id, name):
+        route = f"/api/conversations/{urllib.parse.quote(conversation_id, safe='')}"
+        status, response = api_request(self.base_url, "PATCH", route, {"name": name})
+        if status >= 300:
+            raise RuntimeError(response.get("error", "重命名聊天框失败"))
+        GLib.idle_add(self.finish_rename_conversation, response.get("conversation") or {})
+
+    def finish_rename_conversation(self, conversation):
+        if conversation.get("id"):
+            updated = [item for item in self.conversations if item.get("id") != conversation["id"]]
+            updated.append(conversation)
+            self.update_conversations(updated)
+        return GLib.SOURCE_REMOVE
+
+    def on_search_changed(self, entry):
+        if self.search_timeout:
+            GLib.source_remove(self.search_timeout)
+            self.search_timeout = None
+        query = entry.get_text().strip()
+        self.search_generation += 1
+        generation = self.search_generation
+        if not query:
+            self.sidebar_stack.set_visible_child_name("rooms")
+            return
+        self.sidebar_stack.set_visible_child_name("search")
+        self.clear_box(self.search_results)
+        loading = Gtk.Label(label="正在搜索…", xalign=0)
+        loading.add_css_class("search-empty")
+        self.search_results.append(loading)
+        self.search_timeout = GLib.timeout_add(300, self.start_search, query, generation)
+
+    def start_search(self, query, generation):
+        self.search_timeout = None
+        threading.Thread(target=self.search_worker, args=(query, generation), daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def search_worker(self, query, generation):
+        try:
+            route = "/api/search?" + urllib.parse.urlencode({"q": query})
+            status, response = api_request(self.base_url, "GET", route)
+            if status >= 300:
+                raise RuntimeError(response.get("error", "搜索失败"))
+            GLib.idle_add(self.show_search_results, generation, response)
+        except Exception as error:
+            GLib.idle_add(self.show_search_error, generation, str(error))
+
+    def show_search_error(self, generation, error):
+        if generation != self.search_generation:
+            return GLib.SOURCE_REMOVE
+        self.clear_box(self.search_results)
+        label = Gtk.Label(label=f"搜索失败：{error}", xalign=0, wrap=True)
+        label.add_css_class("search-empty")
+        self.search_results.append(label)
+        return GLib.SOURCE_REMOVE
+
+    def show_search_results(self, generation, response):
+        if generation != self.search_generation:
+            return GLib.SOURCE_REMOVE
+        self.clear_box(self.search_results)
+        conversations = response.get("conversations", [])
+        messages = response.get("messages", [])
+        if conversations:
+            self.append_search_heading("聊天框")
+            for conversation in conversations:
+                button = self.make_search_button(
+                    conversation.get("name", "聊天"), "打开聊天框",
+                    self.open_conversation, conversation.get("id"),
+                )
+                self.search_results.append(button)
+        if messages:
+            self.append_search_heading("聊天记录")
+            for message in messages:
+                conversation_name = message.get("conversationName", "聊天")
+                snippet = str(message.get("text") or message.get("name") or "文件")
+                button = self.make_search_button(
+                    conversation_name, snippet,
+                    self.open_conversation, message.get("conversationId"), message.get("id"),
+                )
+                self.search_results.append(button)
+        if not conversations and not messages:
+            empty = Gtk.Label(label="没有找到匹配的聊天或记录", xalign=0, wrap=True)
+            empty.add_css_class("search-empty")
+            self.search_results.append(empty)
+        return GLib.SOURCE_REMOVE
+
+    def append_search_heading(self, title):
+        heading = Gtk.Label(label=title, xalign=0)
+        heading.add_css_class("sidebar-heading")
+        self.search_results.append(heading)
+
+    def make_search_button(self, title, preview, callback, *args):
+        button = Gtk.Button()
+        button.set_has_frame(False)
+        button.add_css_class("search-result-button")
+        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        name = Gtk.Label(label=title, xalign=0)
+        name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.set_max_width_chars(32)
+        name.add_css_class("search-result-title")
+        details.append(name)
+        text = Gtk.Label(label=preview, xalign=0)
+        text.set_ellipsize(Pango.EllipsizeMode.END)
+        text.set_max_width_chars(35)
+        text.add_css_class("search-result-preview")
+        details.append(text)
+        button.set_child(details)
+        button.connect("clicked", callback, *args)
+        return button
+
+    def scroll_to_message(self, message_id):
+        row = self.message_rows.get(message_id)
+        if not row:
+            self.pending_message_target = message_id
+            return GLib.SOURCE_REMOVE
+        bubble = row.get_first_child()
+        if bubble:
+            bubble.add_css_class("search-hit")
+            GLib.timeout_add_seconds(4, self.clear_search_highlight, bubble)
+        adjustment = self.scroller.get_vadjustment()
+        y = row.get_allocation().y
+        adjustment.set_value(max(adjustment.get_lower(), y - 60))
+        self.pending_message_target = None
+        return GLib.SOURCE_REMOVE
+
+    def clear_search_highlight(self, bubble):
+        bubble.remove_css_class("search-hit")
+        return GLib.SOURCE_REMOVE
 
     def start_receiver(self):
         try:
@@ -283,30 +588,46 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.send_button.set_sensitive(online and not self.sending_text)
         return GLib.SOURCE_REMOVE
 
+    def show_action_error(self, error):
+        self.set_status(f"操作失败：{error}", self.ready)
+        self.status_label.add_css_class("offline")
+        self.status_dot.add_css_class("offline")
+        self.connection.add_css_class("offline")
+        return GLib.SOURCE_REMOVE
+
     def poll(self):
         if self.polling:
             return GLib.SOURCE_CONTINUE
         self.polling = True
-        threading.Thread(target=self.poll_worker, daemon=True).start()
+        conversation_id = self.current_conversation_id
+        threading.Thread(target=self.poll_worker, args=(conversation_id,), daemon=True).start()
         return GLib.SOURCE_CONTINUE
 
-    def poll_worker(self):
+    def poll_worker(self, conversation_id):
         try:
             status, room = api_request(self.base_url, "GET", "/api/status")
             if status != 200 or not room.get("authenticated"):
                 raise RuntimeError("接收端暂未允许这台电脑，请检查固定 IP 信任配置")
-            status, response = api_request(self.base_url, "GET", "/api/messages")
+            status, rooms_response = api_request(self.base_url, "GET", "/api/conversations")
+            if status != 200:
+                raise RuntimeError(rooms_response.get("error", "读取聊天框失败"))
+            status, response = api_request(
+                self.base_url, "GET", "/api/messages?" + urllib.parse.urlencode({"conversationId": conversation_id}),
+            )
             if status != 200:
                 raise RuntimeError(response.get("error", "读取聊天记录失败"))
-            GLib.idle_add(self.show_messages, response.get("messages", []))
+            GLib.idle_add(self.update_conversations, rooms_response.get("conversations", []))
+            GLib.idle_add(self.show_messages, response.get("messages", []), False, True, conversation_id)
             GLib.idle_add(self.set_status, f"已连接 · {room.get('room', 'DeskDrop 房间')}", True)
         except Exception as error:
             GLib.idle_add(self.set_status, f"等待连接：{error}", False)
         finally:
             self.polling = False
 
-    def show_messages(self, messages, force_scroll=False, reconcile=True):
-        should_scroll = force_scroll or self.is_near_bottom()
+    def show_messages(self, messages, force_scroll=False, reconcile=True, conversation_id=None):
+        if conversation_id and conversation_id != self.current_conversation_id:
+            return GLib.SOURCE_REMOVE
+        should_scroll = force_scroll or (self.scroll_when_loaded and not self.pending_message_target) or self.is_near_bottom()
         added = False
         current_ids = {message.get("id") for message in messages if message.get("id")}
         for message in messages:
@@ -330,6 +651,9 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             self.messages_box.append(self.empty_state)
         if (added or removed) and should_scroll:
             GLib.idle_add(self.scroll_to_bottom)
+        if self.pending_message_target and self.pending_message_target in self.message_rows:
+            GLib.idle_add(self.scroll_to_message, self.pending_message_target)
+        self.scroll_when_loaded = False
         return GLib.SOURCE_REMOVE
 
     def is_near_bottom(self):
@@ -410,28 +734,30 @@ class DeskDropWindow(Gtk.ApplicationWindow):
         self.entry.set_text("")
         self.entry.set_sensitive(False)
         self.send_button.set_sensitive(False)
-        self.run_async(self.post_text, value)
+        self.run_async(self.post_text, self.current_conversation_id, value)
 
-    def post_text(self, value):
+    def post_text(self, conversation_id, value):
         status, response = api_request(self.base_url, "POST", "/api/messages", {
             "text": value, "sender": self.sender_name, "senderId": self.sender_id,
+            "conversationId": conversation_id,
         })
         if status >= 300:
             raise RuntimeError(response.get("error", "消息发送失败"))
-        GLib.idle_add(self.finish_text_send, response.get("message", {}))
+        GLib.idle_add(self.finish_text_send, conversation_id, response.get("message", {}))
 
-    def finish_text_send(self, message):
+    def finish_text_send(self, conversation_id, message):
         self.sending_text = False
         self.entry.set_sensitive(True)
         self.send_button.set_sensitive(self.ready)
-        if message:
+        if message and conversation_id == self.current_conversation_id:
             self.show_messages([message], force_scroll=True, reconcile=False)
         self.entry.grab_focus()
         return GLib.SOURCE_REMOVE
 
-    def fail_text_send(self, value, error):
+    def fail_text_send(self, conversation_id, value, error):
         self.sending_text = False
-        self.entry.set_text(value)
+        if conversation_id == self.current_conversation_id:
+            self.entry.set_text(value)
         self.entry.set_sensitive(True)
         self.send_button.set_sensitive(self.ready)
         self.entry.grab_focus()
@@ -452,13 +778,16 @@ class DeskDropWindow(Gtk.ApplicationWindow):
             if selected and selected.get_path() and self.ready and not self.transfer_active:
                 file_path = selected.get_path()
                 self.begin_transfer(Path(file_path).name, "正在发送")
-                self.run_async(self.upload_file, file_path)
+                self.run_async(self.upload_file, file_path, self.current_conversation_id)
         chooser.destroy()
 
-    def upload_file(self, file_path):
+    def upload_file(self, file_path, conversation_id):
         parsed = urllib.parse.urlsplit(self.base_url)
         name = Path(file_path).name
-        query = urllib.parse.urlencode({"name": name, "sender": self.sender_name, "senderId": self.sender_id})
+        query = urllib.parse.urlencode({
+            "name": name, "sender": self.sender_name, "senderId": self.sender_id,
+            "conversationId": conversation_id,
+        })
         route = f"/api/upload?{query}"
         conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=30)
         size = os.path.getsize(file_path)
@@ -589,13 +918,13 @@ class DeskDropWindow(Gtk.ApplicationWindow):
                 function(*args)
             except Exception as error:
                 if function.__name__ == "post_text":
-                    GLib.idle_add(self.fail_text_send, args[0], str(error))
+                    GLib.idle_add(self.fail_text_send, args[0], args[1], str(error))
                 elif function.__name__ in {"upload_file", "download_file"}:
                     GLib.idle_add(self.finish_transfer, False, f"传输失败：{error}")
                     if function.__name__ == "download_file":
                         GLib.idle_add(args[1].set_sensitive, True)
                 else:
-                    GLib.idle_add(self.set_status, f"操作失败：{error}", self.ready)
+                    GLib.idle_add(self.show_action_error, str(error))
         threading.Thread(target=work, daemon=True).start()
 
     def open_received_folder(self, *_args):
