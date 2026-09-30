@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Remove DeskDrop Autostart
+Comment=Disable DeskDrop automatic startup
+Terminal=true
+Exec=sh -c 'cd "$(dirname "$1")" && exec ./remove-autostart.sh' -- %k
+Categories=Utility;

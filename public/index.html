@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7f3">
+    <title>DeskDrop · 文件传输</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DeskDrop 首页">
+          <span class="brand-mark">D</span>
+          <span>DeskDrop</span>
+        </a>
+        <div class="local-badge"><span class="status-dot"></span>仅在本地网络传输</div>
+      </header>
+
+      <main>
+        <section class="intro">
+          <p class="eyebrow">YOUR PERSONAL FILE BRIDGE</p>
+          <h1>文件，轻松送到<br class="mobile-break">另一台电脑。</h1>
+          <p class="intro-copy">选择文件，点击发送。它们会出现在这台电脑的接收列表里。</p>
+        </section>
+
+        <section id="login-panel" class="card login-card" hidden>
+          <div class="card-icon lock-icon" aria-hidden="true">↗</div>
+          <h2>连接到接收电脑</h2>
+          <p class="muted">输入接收电脑启动窗口中显示的 PIN。</p>
+          <form id="login-form" class="login-form">
+            <label for="pin-input">连接 PIN</label>
+            <div class="pin-row">
+              <input id="pin-input" name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="12" placeholder="输入 PIN" required>
+              <button class="button button-primary" type="submit">连接 <span aria-hidden="true">→</span></button>
+            </div>
+            <p id="login-error" class="message error-message" aria-live="polite"></p>
+          </form>
+          <div class="hint"><span aria-hidden="true">⌁</span><span>找不到 PIN？请查看接收电脑上的 DeskDrop 启动窗口。</span></div>
+        </section>
+
+        <section id="transfer-panel" hidden>
+          <div class="card transfer-card">
+            <div class="transfer-heading">
+              <div>
+                <div class="section-label">发送文件</div>
+                <p class="muted">支持文档、图片和其他文件，单个文件最大 <strong id="max-size">1 GB</strong></p>
+              </div>
+              <button id="logout-button" class="button button-quiet" type="button">断开连接</button>
+            </div>
+            <input id="file-input" type="file" multiple hidden>
+            <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择文件或拖放文件到此处">
+              <div class="upload-symbol" aria-hidden="true"><span>↑</span></div>
+              <h2>把文件拖到这里</h2>
+              <p>或者 <button id="browse-button" class="text-button" type="button">浏览电脑选择文件</button></p>
+              <span class="drop-caption">多个文件也可以一起发送</span>
+            </div>
+            <div id="upload-queue" class="upload-queue" aria-live="polite"></div>
+            <p id="upload-error" class="message error-message" aria-live="polite"></p>
+          </div>
+
+          <section class="files-section">
+            <div class="files-heading">
+              <div>
+                <div class="section-label">已接收</div>
+                <p id="files-summary" class="muted">正在读取文件列表…</p>
+              </div>
+              <button id="refresh-button" class="button button-quiet refresh-button" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+            </div>
+            <div id="file-list" class="file-list"></div>
+          </section>
+        </section>
+      </main>
+
+      <footer>
+        <span>DeskDrop</span>
+        <span>文件保存在接收电脑上，不会上传到云端。</span>
+      </footer>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Send to DeskDrop
+Comment=Open the configured DeskDrop receiver
+Terminal=true
+Exec=sh -c 'cd "$(dirname "$1")" && exec ./send-to-deskdrop.sh' -- %k
+Categories=Utility;

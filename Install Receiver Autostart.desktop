@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Install DeskDrop Receiver Autostart
+Comment=Start the file receiver automatically after login
+Terminal=true
+Exec=sh -c 'cd "$(dirname "$1")" && exec ./install-autostart.sh receiver' -- %k
+Categories=Utility;

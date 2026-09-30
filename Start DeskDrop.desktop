@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Start DeskDrop
+Comment=Start the local file receiver
+Terminal=true
+Exec=sh -c 'cd "$(dirname "$1")" && ./start-deskdrop.sh' -- %k
+Categories=Utility;
