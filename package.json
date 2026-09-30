@@ -2,7 +2,7 @@
   "name": "deskdrop",
   "version": "1.0.0",
   "private": false,
-  "description": "A tiny, self-hosted file transfer bridge for your local network.",
+  "description": "A self-hosted native GTK LAN chat room with bidirectional file transfer.",
   "type": "module",
   "scripts": {
     "start": "node server.js"

@@ -21,24 +21,8 @@ case "$mode" in
       exit 1
     fi
     env_file="$config_dir/receiver.env"
-    if [[ ! -f "$env_file" ]]; then
-      read -r -p '为接收端设置固定 PIN（直接回车会生成一个随机 PIN）：' pin
-      if [[ -z "$pin" ]]; then
-        pin=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
-        pin=$((pin % 900000 + 100000))
-      fi
-      if [[ ! "$pin" =~ ^[0-9]{4,12}$ ]]; then
-        echo 'PIN 必须是 4–12 位数字。' >&2
-        exit 1
-      fi
-      printf 'export TRANSFER_PIN=%q\n' "$pin" > "$env_file"
-      chmod 600 "$env_file"
-      echo "接收 PIN：$pin（已保存到 $env_file）"
-    else
-      # shellcheck disable=SC1090
-      source "$env_file"
-      echo "接收 PIN：${TRANSFER_PIN:-（配置文件中没有 PIN）}"
-    fi
+    touch "$env_file"
+    chmod 600 "$env_file"
 
     bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
     unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -71,7 +55,6 @@ EOF
     echo '查看地址和日志：journalctl --user -u deskdrop.service -n 30 --no-pager'
     ;;
   sender)
-    "$project_dir/send-to-deskdrop.sh" --configure
     autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
     mkdir -p "$autostart_dir"
     sender_arg=$(desktop_escape "$project_dir/send-to-deskdrop.sh")
@@ -79,12 +62,12 @@ EOF
 [Desktop Entry]
 Type=Application
 Name=DeskDrop Sender
-Comment=Open the configured DeskDrop receiver after login
+Comment=Open the native DeskDrop chat room after login
 Exec=/bin/bash $sender_arg --no-prompt
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
-    echo '发送端已配置为登录后自动打开接收页面。'
+    echo 'DeskDrop 聊天客户端已配置为登录后自动打开。'
     ;;
   *)
     echo 'Usage: install-autostart.sh receiver|sender' >&2

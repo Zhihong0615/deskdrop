@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Configure DeskDrop Sender
-Comment=Save the address of your DeskDrop receiver
-Terminal=false
-Exec=gtk-launch deskdrop-configure-sender
-Categories=Utility;

@@ -15,6 +15,10 @@ for arg in "$@"; do
   [[ "$arg" == '--no-browser' ]] && open_browser=0
 done
 
+if (( open_browser )); then
+  exec python3 "$PWD/deskdrop-client.py" --host
+fi
+
 is_supported_node() {
   command -v "$1" >/dev/null 2>&1 || return 1
   local version major
@@ -64,16 +68,5 @@ else
   fi
 fi
 
-if (( open_browser )); then
-  echo 'Opening DeskDrop in your browser. Keep this window open while receiving files.'
-  (
-    sleep 2
-    case "$(uname -s)" in
-      Darwin) open http://localhost:8787 >/dev/null 2>&1 || true ;;
-      Linux) xdg-open http://localhost:8787 >/dev/null 2>&1 || true ;;
-    esac
-  ) &
-else
-  export DESKDROP_SERVICE=1
-fi
-"$node_cmd" server.js
+export DESKDROP_SERVICE=1
+exec "$node_cmd" server.js

@@ -8,6 +8,7 @@ import { randomBytes, randomInt, timingSafeEqual, randomUUID } from 'node:crypto
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { isIP } from 'node:net';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -27,6 +28,11 @@ const loginAttempts = new Map();
 const sessionTtlMs = 7 * 24 * 60 * 60 * 1000;
 const stateDir = path.resolve(process.env.DESKDROP_STATE_DIR || path.join(homedir(), '.local', 'state', 'deskdrop'));
 const sessionsFile = path.join(stateDir, 'sessions.json');
+const messagesFile = path.join(stateDir, 'messages.json');
+const trustedClients = (process.env.DESKDROP_TRUSTED_CLIENTS || '').split(',').map((entry) => entry.trim()).filter(Boolean);
+const maxMessages = 500;
+const messages = [];
+const eventClients = new Set();
 const publicFiles = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
@@ -49,6 +55,18 @@ try {
   if (error.code !== 'ENOENT') console.warn(`Could not restore saved login sessions: ${error.message}`);
 }
 
+try {
+  const saved = JSON.parse(await readFile(messagesFile, 'utf8'));
+  if (Array.isArray(saved)) {
+    for (const message of saved.slice(-maxMessages)) {
+      if (message && typeof message.id === 'string' && ['text', 'file'].includes(message.type)
+        && Number.isFinite(message.createdAt) && typeof message.sender === 'string') messages.push(message);
+    }
+  }
+} catch (error) {
+  if (error.code !== 'ENOENT') console.warn(`Could not restore saved chat history: ${error.message}`);
+}
+
 async function persistSessions() {
   const now = Date.now();
   for (const [token, expires] of sessions) if (expires <= now) sessions.delete(token);
@@ -56,6 +74,35 @@ async function persistSessions() {
   await writeFile(temp, JSON.stringify(Object.fromEntries(sessions)), { mode: 0o600 });
   await chmod(temp, 0o600);
   await rename(temp, sessionsFile);
+}
+
+async function persistMessages() {
+  while (messages.length > maxMessages) messages.shift();
+  const temp = `${messagesFile}.${randomUUID()}.tmp`;
+  await writeFile(temp, JSON.stringify(messages), { mode: 0o600 });
+  await chmod(temp, 0o600);
+  await rename(temp, messagesFile);
+}
+
+function publish(event) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of eventClients) {
+    try {
+      if (client.destroyed || !client.write(payload)) continue;
+    } catch {
+      eventClients.delete(client);
+    }
+  }
+}
+
+function cleanSender(value) {
+  const sender = String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32);
+  return sender || '我的电脑';
+}
+
+function cleanSenderId(value) {
+  const id = String(value || '');
+  return /^[a-zA-Z0-9_-]{8,64}$/.test(id) ? id : 'unknown-device';
 }
 
 function headers(res) {
@@ -85,7 +132,7 @@ function getSession(req) {
 }
 
 function requireSession(req, res) {
-  if (getSession(req)) return true;
+  if (getSession(req) || isTrustedClient(req)) return true;
   json(res, 401, { error: 'Please enter the PIN to continue.' });
   return false;
 }
@@ -141,7 +188,32 @@ async function listFiles() {
 }
 
 function clientIp(req) {
-  return req.socket.remoteAddress || 'unknown';
+  const address = req.socket.remoteAddress || 'unknown';
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
+}
+
+function ipv4Number(address) {
+  if (isIP(address) !== 4) return null;
+  return address.split('.').reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0);
+}
+
+function isTrustedClient(req) {
+  const address = clientIp(req);
+  if (address === '127.0.0.1' || address === '::1') return true;
+  for (const rule of trustedClients) {
+    if (!rule.includes('/')) {
+      if (address === rule) return true;
+      continue;
+    }
+    const [network, prefixText, ...extra] = rule.split('/');
+    const bits = Number(prefixText);
+    const clientNumber = ipv4Number(address);
+    const networkNumber = ipv4Number(network);
+    if (extra.length || clientNumber === null || networkNumber === null || !Number.isInteger(bits) || bits < 0 || bits > 32) continue;
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    if ((clientNumber & mask) === (networkNumber & mask)) return true;
+  }
+  return false;
 }
 
 async function handle(req, res) {
@@ -157,11 +229,15 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && route === '/api/status') {
-    json(res, 200, { authenticated: Boolean(getSession(req)) });
+    json(res, 200, { authenticated: Boolean(getSession(req) || isTrustedClient(req)), room: hostname() });
     return;
   }
 
   if (req.method === 'POST' && route === '/api/login') {
+    if (trustedClients.length) {
+      json(res, 403, { error: 'PIN login is disabled for this two-computer room.' });
+      return;
+    }
     const ip = clientIp(req);
     const attempt = loginAttempts.get(ip);
     if (attempt && attempt.until > Date.now() && attempt.count >= 8) {
@@ -202,6 +278,63 @@ async function handle(req, res) {
 
   if (route.startsWith('/api/') && !requireSession(req, res)) return;
 
+  if (req.method === 'GET' && route === '/api/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(': connected\n\n');
+    eventClients.add(res);
+    const heartbeat = setInterval(() => {
+      if (!res.destroyed) res.write(': ping\n\n');
+    }, 25_000);
+    heartbeat.unref();
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      eventClients.delete(res);
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && route === '/api/messages') {
+    const knownFiles = new Set(messages.filter((message) => message.type === 'file').map((message) => message.fileId));
+    const files = await listFiles();
+    const legacy = files.filter((file) => !knownFiles.has(file.id)).map((file) => ({
+      id: `legacy-${file.id}`,
+      type: 'file',
+      fileId: file.id,
+      name: file.name,
+      size: file.size,
+      sender: '已接收文件',
+      senderId: 'legacy',
+      createdAt: file.modified,
+    }));
+    const history = [...messages, ...legacy].sort((a, b) => a.createdAt - b.createdAt);
+    json(res, 200, { messages: history });
+    return;
+  }
+
+  if (req.method === 'POST' && route === '/api/messages') {
+    const body = await readJson(req, 16 * 1024);
+    const text = String(body.text || '').trim();
+    if (!text) { json(res, 400, { error: '消息不能为空。' }); return; }
+    if (text.length > 2000) { json(res, 413, { error: '消息最多 2000 个字符。' }); return; }
+    const message = {
+      id: randomUUID(),
+      type: 'text',
+      text,
+      sender: cleanSender(body.sender),
+      senderId: cleanSenderId(body.senderId),
+      createdAt: Date.now(),
+    };
+    messages.push(message);
+    await persistMessages();
+    publish({ type: 'message', message });
+    json(res, 201, { message });
+    return;
+  }
+
   if (req.method === 'GET' && route === '/api/files') {
     json(res, 200, { files: await listFiles(), maxBytes });
     return;
@@ -229,6 +362,20 @@ async function handle(req, res) {
     try {
       await pipeline(req, limiter, createWriteStream(tempPath, { flags: 'wx' }));
       await rename(tempPath, targetPath);
+      const file = await stat(targetPath);
+      const message = {
+        id: randomUUID(),
+        type: 'file',
+        fileId: id,
+        name: filename,
+        size: received,
+        sender: cleanSender(url.searchParams.get('sender')),
+        senderId: cleanSenderId(url.searchParams.get('senderId')),
+        createdAt: file.mtimeMs,
+      };
+      messages.push(message);
+      await persistMessages();
+      publish({ type: 'message', message });
       json(res, 201, { id, name: filename, size: received });
     } catch (error) {
       await unlink(tempPath).catch(() => {});
@@ -263,6 +410,11 @@ async function handle(req, res) {
     }
     if (req.method === 'DELETE') {
       await unlink(filePath);
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (messages[index].type === 'file' && messages[index].fileId === id) messages.splice(index, 1);
+      }
+      await persistMessages();
+      publish({ type: 'refresh' });
       json(res, 200, { ok: true });
       return;
     }
@@ -305,7 +457,8 @@ server.listen(port, host, () => {
   const localHostname = hostname().split('.')[0];
   if (/^[a-zA-Z0-9-]+$/.test(localHostname)) console.log(`  Hostname (if mDNS is enabled): http://${localHostname}.local:${port}`);
   for (const address of addresses) console.log(`  Local network: http://${address}:${port}`);
-  console.log(`\nPIN: ${pin}`);
+  if (trustedClients.length) console.log('\nTrusted-computer mode is on; PIN login is disabled.');
+  else console.log(`\nPIN: ${pin}`);
   console.log(`Receiving files in: ${inbox}`);
   if (process.env.DESKDROP_SERVICE === '1') console.log('Running as a user service. Stop it with: systemctl --user stop deskdrop.service\n');
   else console.log('Keep this terminal open while transferring files. Press Ctrl+C to stop.\n');
